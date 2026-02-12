@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const MENUS = [
   { id: "cut", label: "✂️ カット", emoji: "✂️" },
@@ -15,6 +16,33 @@ interface GenerationResult {
   karte_text: string;
   sns_text: string;
 }
+
+const SYSTEM_PROMPT = `# Role
+あなたは優秀な美容師のアシスタントです。ベテラン美容師かつSNSマーケターとして振る舞ってください。
+
+# Instructions
+入力された施術メニューとメモを元に、以下の2つのセクションを含むJSONのみを出力してください。
+余計な説明やマークダウンは一切不要です。純粋なJSONのみを返してください。
+
+1. "karte_text": 
+   - 目的: サロン内部のカルテ記録用
+   - トーン: 事務的、簡潔、事実ベース
+   - フォーマット: 箇条書き（各項目を改行で区切る）
+   - 内容: 施術内容、薬剤レシピ（メモにある場合）、特記事項
+   - 感情は排除し、事実のみを記載
+
+2. "sns_text":
+   - 目的: Instagramのフィード投稿用
+   - トーン: 親しみやすく、トレンド感のある口調。女性客に響く、おしゃれな文体
+   - 内容: ヘアスタイルの魅力、施術のこだわり、お客様とのエピソード（メモにあれば）
+   - 絵文字を適度に使用
+   - 末尾: 関連性の高いハッシュタグを15個程度（例: #美容室 #ヘアカラー #透明感カラー 等）
+
+# Output Format (JSON only)
+{
+  "karte_text": "...",
+  "sns_text": "..."
+}`;
 
 export default function Home() {
   const [selectedMenus, setSelectedMenus] = useState<string[]>([]);
@@ -78,6 +106,12 @@ export default function Home() {
       return;
     }
 
+    const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+    if (!apiKey) {
+      setError("APIキーが設定されていません。環境変数を確認してください。");
+      return;
+    }
+
     setError("");
     setIsLoading(true);
     setResult(null);
@@ -89,25 +123,49 @@ export default function Home() {
         (id) => MENUS.find((m) => m.id === id)?.label.replace(/^[^\s]+\s/, "") || id
       );
 
-      const response = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          menus: menuLabels,
-          memo: memo.trim(),
-        }),
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({
+        model: "gemini-2.0-flash",
+        generationConfig: {
+          temperature: 0.7,
+          topP: 0.95,
+          maxOutputTokens: 2048,
+        },
       });
 
-      const data = await response.json();
+      const userPrompt = `# Input Data
+メニュー: ${menuLabels.join("、")}
+メモ: ${memo.trim()}`;
 
-      if (!response.ok) {
-        throw new Error(data.error || "生成に失敗しました");
+      const result = await model.generateContent([
+        { text: SYSTEM_PROMPT },
+        { text: userPrompt },
+      ]);
+
+      const responseText = result.response.text();
+
+      let jsonStr = responseText;
+      const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (jsonMatch) {
+        jsonStr = jsonMatch[1].trim();
       }
 
-      setResult(data);
+      const braceStart = jsonStr.indexOf("{");
+      const braceEnd = jsonStr.lastIndexOf("}");
+      if (braceStart !== -1 && braceEnd !== -1) {
+        jsonStr = jsonStr.substring(braceStart, braceEnd + 1);
+      }
+
+      const parsed = JSON.parse(jsonStr);
+
+      setResult({
+        karte_text: parsed.karte_text || "",
+        sns_text: parsed.sns_text || "",
+      });
     } catch (err) {
+      console.error("Generation error:", err);
       setError(
-        err instanceof Error ? err.message : "エラーが発生しました。もう一度お試しください。"
+        "生成に失敗しました。時間をおいて再試行してください。"
       );
     } finally {
       setIsLoading(false);
